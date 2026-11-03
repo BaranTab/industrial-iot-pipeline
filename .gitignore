@@ -1,0 +1,14 @@
+# Build output
+/bin/
+*.exe
+*.test
+*.out
+coverage.html
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local secrets (never commit them)
+.env

@@ -1,0 +1,31 @@
+# Gateway configuration for running on your own machine (go run).
+# configs/gateway.yaml is the same file with Docker host names.
+site: karabuk
+buffer_size: 10000
+metrics_addr: ":9100"
+
+mqtt:
+  broker: tcp://localhost:1883
+  client_id: gateway-karabuk
+  topic_prefix: plant
+  qos: 1
+
+devices:
+  - id: furnace-1
+    address: localhost:5020
+    unit_id: 1
+    poll_interval: 1s
+    timeout: 2s
+    registers: &standard-map # YAML anchor: reuse this list below
+      - { name: temperature_c,  address: 0, scale: 0.1,  unit: "°C" }
+      - { name: pressure_bar,   address: 1, scale: 0.01, unit: bar }
+      - { name: vibration_mm_s, address: 2, scale: 0.01, unit: mm/s }
+      - { name: current_a,      address: 3, scale: 0.1,  unit: A }
+      - { name: running,        address: 4, scale: 1 }
+
+  - id: pump-1
+    address: localhost:5021
+    unit_id: 1
+    poll_interval: 1s
+    timeout: 2s
+    registers: *standard-map

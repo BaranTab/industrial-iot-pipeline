@@ -50,8 +50,10 @@ type Poller struct {
 }
 
 // Run polls until ctx is cancelled, sending one message per poll to out.
-// A failed read produces a "bad" quality message, then the connection is
-// re-opened with exponential backoff.
+// Any failure (connect or read) produces a "bad" quality message and a
+// pause before the next attempt. The pause doubles after every failure
+// (exponential backoff) and resets only after a successful read: a device
+// that accepts connections but fails every read must not be hammered.
 func (p *Poller) Run(ctx context.Context, out chan<- telemetry.Message) {
 	if p.Now == nil {
 		p.Now = time.Now
@@ -67,24 +69,24 @@ func (p *Poller) Run(ctx context.Context, out chan<- telemetry.Message) {
 
 	for ctx.Err() == nil {
 		client, err := p.connect()
-		if err != nil {
-			log.Warn("connect failed", "err", err, "retry_in", backoff)
-			p.emit(ctx, out, p.badMessage(err))
-			if !sleep(ctx, backoff) {
-				return
+		if err == nil {
+			log.Info("connected", "addr", p.Device.Address)
+			var reads int
+			reads, err = p.pollLoop(ctx, client, out)
+			_ = client.Close()
+			if reads > 0 {
+				backoff = p.MinBackoff // the device worked for a while
 			}
-			backoff = min(backoff*2, p.MaxBackoff)
-			continue
 		}
-		log.Info("connected", "addr", p.Device.Address)
-		backoff = p.MinBackoff
-
-		err = p.pollLoop(ctx, client, out)
-		_ = client.Close()
-		if err != nil {
-			log.Warn("poll failed, reconnecting", "err", err)
-			p.emit(ctx, out, p.badMessage(err))
+		if err == nil {
+			return // ctx was cancelled during polling
 		}
+		log.Warn("device unavailable", "err", err, "retry_in", backoff)
+		p.emit(ctx, out, p.badMessage(err))
+		if !sleep(ctx, backoff) {
+			return
+		}
+		backoff = min(backoff*2, p.MaxBackoff)
 	}
 }
 
@@ -99,20 +101,22 @@ func (p *Poller) connect() (Client, error) {
 	return c, nil
 }
 
-// pollLoop reads on every tick and returns on the first error.
-func (p *Poller) pollLoop(ctx context.Context, c Client, out chan<- telemetry.Message) error {
+// pollLoop reads on every tick and returns on the first error, together
+// with the number of successful reads.
+func (p *Poller) pollLoop(ctx context.Context, c Client, out chan<- telemetry.Message) (reads int, err error) {
 	start, qty := BlockRange(p.Device.Registers)
 	ticker := time.NewTicker(p.Device.PollInterval)
 	defer ticker.Stop()
 	for {
 		raw, err := c.ReadRegisters(start, qty, modbus.INPUT_REGISTER)
 		if err != nil {
-			return err
+			return reads, err
 		}
 		values, err := Decode(p.Device.Registers, start, raw)
 		if err != nil {
-			return err
+			return reads, err
 		}
+		reads++
 		p.emit(ctx, out, telemetry.Message{
 			V: telemetry.Version, Site: p.Site, Device: p.Device.ID,
 			Time: p.Now().UTC(), Quality: telemetry.QualityGood, Values: values,
@@ -120,7 +124,7 @@ func (p *Poller) pollLoop(ctx context.Context, c Client, out chan<- telemetry.Me
 
 		select {
 		case <-ctx.Done():
-			return nil
+			return reads, nil
 		case <-ticker.C:
 		}
 	}
